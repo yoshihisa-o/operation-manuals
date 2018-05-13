@@ -1,0 +1,214 @@
+=======================================
+ How to Set Up Selenium Grid
+=======================================
+Author : Yoshihisa Onoue
+
+# Overview of This Operation
+This is the operation manual to set up the hub and nodes of Selenium Grid on Linux servers.
+
+# Introduction of Selenium Grid
+https://github.com/SeleniumHQ/selenium/wiki/Grid2
+
+# Prerequisites
+- This operation is supposed to be conducted on the host for the hub.
+- The all hosts for the hub and nodes mount the same NFS and the "WORK_DIR" is on the NFS.
+- Google Chrome has been already installed on all hosts for node.
+
+#--------------------------------------------------
+# Download Selenium Server
+#--------------------------------------------------
+# Download selenium server standalone
+WORK_DIR=~/tools/selenium
+echo     ${WORK_DIR}
+mkdir -p ${WORK_DIR}
+cd       ${WORK_DIR}
+
+# Select from the list
+wget "http://selenium-release.storage.googleapis.com/3.9/selenium-server-standalone-3.9.1.jar"
+
+# Make a symlink to make it easy to switch the version of Selenium Server
+ls -l selenium-server-standalone-3.9.1.jar selenium-server-standalone.jar
+ln -s selenium-server-standalone-3.9.1.jar selenium-server-standalone.jar
+ls -l selenium-server-standalone-3.9.1.jar selenium-server-standalone.jar
+
+#--------------------------------------------------
+# Create a Script to Run Selenium Server Hub
+#--------------------------------------------------
+echo ${WORK_DIR}
+cd   ${WORK_DIR}
+mkdir log
+
+vi start_hub.sh
+================================
+#!/bin/bash
+# This is the script to start the hub of Selenium Grid on the port 4444.
+# The console of the hub is http://localhost:4444/grid/console
+
+# The directory where this script is placed
+DIR_SCRIPT=~/tools/selenium
+java -jar selenium-server-standalone.jar -role hub  > ${DIR_SCRIPT}/log/hub.log 2>&1 &
+exit 0;
+================================
+
+# Start the hub
+sh start_hub.sh; tail -F log/hub.log
+
+# Open the console from browser
+http://localhost:4444/grid/console
+
+#--------------------------------------------------
+# Download Chromedriver
+#--------------------------------------------------
+# Download Chromedriver
+echo ${WORK_DIR}
+cd   ${WORK_DIR}
+wget "https://chromedriver.storage.googleapis.com/2.25/chromedriver_linux64.zip"
+unzip chromedriver_linux64.zip
+ls -l chromedriver
+
+#--------------------------------------------------
+# Create Configuration Files for Selenium Servers
+#--------------------------------------------------
+echo ${WORK_DIR}
+cd   ${WORK_DIR}
+# Write a  template of configuration of the node
+mkdir conf
+vi conf/template.json
+================================
+{
+  "capabilities":
+  [
+    {
+      "browserName": "chrome",
+      "maxInstances": ###_MAX_SESSIONS_###,
+      "seleniumProtocol": "WebDriver",
+      "version": "###_VERSION_###"
+    }
+  ],
+  "proxy": "org.openqa.grid.selenium.proxy.DefaultRemoteProxy",
+  "maxSession": 5,
+  "port": ###_PORT_NUM_NODE_###,
+  "register": true,
+  "registerCycle": 5000,
+  "hub": "###_ENDPOINT_HUB_###",
+  "nodeStatusCheckTimeout": 5000,
+  "nodePolling": 5000,
+  "role": "node",
+  "unregisterIfStillDownAfter": 60000,
+  "downPollingLimit": 2,
+  "debug": false,
+  "servlets" : [],
+  "withoutServlets": [],
+  "custom": {}
+}
+================================
+
+# Create a list of hosts to run Selenium Servers
+echo -n > conf/selenium_node_host_list.conf
+## Add the name of hosts
+vi conf/selenium_node_host_list.conf
+
+# Create a configuration file for each node
+## Common settings
+MAX_SESSIONS=5
+PORT_NUM_NODE=4445
+ENDPOINT_HUB="http://localhost:4444"
+NODE_NUM=01
+
+## Replace the template
+for hostname_node in `cat conf/selenium_node_host_list.conf`; do
+    # The version of the browser which this node supports
+    VERSION="${hostname_node}-${NODE_NUM}"
+
+    # Create a configuration file
+    sed -e "s|###_MAX_SESSIONS_###|${MAX_SESSIONS}|g" \
+        -e "s|###_VERSION_###|${VERSION}|g" \
+        -e "s|###_PORT_NUM_NODE_###|${PORT_NUM_NODE}|g" \
+        -e "s|###_ENDPOINT_HUB_###|${ENDPOINT_HUB}|g" \
+        conf/template.json > conf/${hostname_node}-${NODE_NUM}.json
+done
+
+# Confirm that all variables in the template are replaced
+find conf -type f | xargs grep "###"
+
+#--------------------------------------------------
+# Create a Script to Run & Stop Selenium Server Node
+#--------------------------------------------------
+echo ${WORK_DIR}
+cd   ${WORK_DIR}
+
+vi start_nodes.sh
+================================
+#!/bin/bash
+# This is the script to start the node of Selenium Grid.
+# After this script is executed, confirm that the nodes are registered and the configuration of the node is as expected
+# http://localhost:4444/grid/console
+
+# The directory where this script is placed
+DIR_SCRIPT=~/tools/selenium
+# Currently only one node runs on each server
+NODE_NUM=01
+
+for hostname_node in `cat ${DIR_SCRIPT}/conf/selenium_node_host_list.conf`; do
+  echo "========== ${hostname_node} =========="
+  ssh ${hostname_node} "java -Dwebdriver.chrome.driver=${DIR_SCRIPT}/chromedriver \
+                             -jar selenium-server-standalone.jar \
+                             -role node \
+                             -nodeConfig ${DIR_SCRIPT}/conf/${hostname_node}-${NODE_NUM}.json \
+                             > ${DIR_SCRIPT}/log/node_${NODE_NUM}.log 2>&1 &"
+  # Check the log
+  cat ${DIR_SCRIPT}/log/node_${NODE_NUM}.log
+done
+exit 0;
+================================
+
+# The script to stop nodes
+vi stop_nodes.sh
+================================
+#!/bin/bash
+# This is the script to start the node of Selenium Grid.
+
+# The directory where this script is placed
+DIR_SCRIPT=~/tools/selenium
+# Currently only one node runs on each server
+NODE_NUM=01
+
+for hostname_node in `cat ${DIR_SCRIPT}/conf/selenium_node_host_list.conf`; do
+  echo "========== ${hostname_node} =========="
+  echo "Killing the following process : "
+  ssh ${hostname_node} 'pgrep -lfa "role node"'
+  ssh ${hostname_node} 'pkill -la  "role node"'
+  echo "Result : "
+  ssh ${hostname_node} 'pgrep -lfa "role node"'
+done
+exit 0;
+================================
+
+vi check_nodes_status.sh
+================================
+#!/bin/bash
+# This is the script to check if a new session can be created on each node.
+
+# The directory where this script is placed
+DIR_SCRIPT=~/tools/selenium
+# Currently only one node runs on each server
+NODE_NUM=01
+
+for hostname_node in `cat ${DIR_SCRIPT}/conf/selenium_node_host_list.conf`; do
+  echo "========== ${hostname_node} =========="
+  echo '{"desiredCapabilities":{"browserName":"chrome", "version": "###_VERSION_###", "chromeOptions": {"args": ["user-data-dir=/tmp/chrome_user_dir_test"]}}}' > /tmp/check_nodes_status_reqbody.json
+  sed -i -e "s/###_VERSION_###/${hostname_node}-${NODE_NUM}/g" /tmp/check_nodes_status_reqbody.json
+  curl -X POST \
+       -H "Content-Type: application/json" \
+       -d @/tmp/check_nodes_status_reqbody.json \
+       http://localhost:4444/session | jq -r ".sessionId"
+done
+exit 0;
+================================
+
+# Specify one node by "version" and create a session on the node.
+## Replace ###_VERSION_###"
+curl -X POST \
+     -H "Content-Type: application/json" \
+     -d '{"desiredCapabilities":{"browserName":"chrome", "version": "###_VERSION_###", "chromeOptions": {"args": ["user-data-dir=/tmp/chrome_user_dir_test"]}}}' \
+     http://localhost:4444/wd/hub/session | jq -r ".sessionId"
